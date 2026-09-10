@@ -1,3 +1,5 @@
+'use client';
+
 import { createContext, useCallback, useContext, useState, type ReactNode, type FormEvent } from 'react';
 import { ZodType } from 'zod';
 import { aiBus } from '../../eventBus/eventBus';
@@ -50,7 +52,13 @@ export interface FormProps<T extends Record<string, any> = Record<string, any>> 
   schema?: ZodType<T>;
   /** Initial field values. Fields not listed default to empty string. */
   initialValues?: Partial<T>;
-  /** Called with validated values on successful submission. */
+  /**
+   * Called with the schema's parsed output on successful submission — for
+   * a schema using `z.coerce.number()`, `.transform()`, etc., this is the
+   * transformed value (a real `number`), not the raw string every field
+   * control itself always stores. Forms with no `schema` get the raw field
+   * values as-is, since there's nothing to parse them into.
+   */
   onSubmit?: (values: T) => void | Promise<void>;
   children: ReactNode;
   /** Form element id attribute. Also used as `formId` in event bus payloads. */
@@ -61,6 +69,8 @@ export interface FormProps<T extends Record<string, any> = Record<string, any>> 
  * @manifest Zod 4 schema-driven form. Controls bind via context — no register() or onChange boilerplate
  * @manifestChildren FormField, FormError, Button, SubmitButton, Input, Select, Checkbox, Switch, Textarea, RadioGroup, Slider
  * @manifestCategory Form Controls
+ * @manifestAntiPatternAvoid Write `register()` or `onChange` boilerplate for form fields
+ * @manifestAntiPatternInstead Nest `<Input>`, `<Select>`, etc. inside `<FormField name="...">` — binding is automatic
  */
 export function Form<T extends Record<string, any> = Record<string, any>>({
   schema,
@@ -74,12 +84,25 @@ export function Form<T extends Record<string, any> = Record<string, any>>({
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  const validateValues = (currentValues: Record<string, any>): Record<string, string> => {
-    if (!schema) return {};
+  // Returns both the field-level error map AND `schema`'s actual parsed
+  // output (`data`) — the two previously came apart at the one place it
+  // mattered: handleSubmit computed errors from this same safeParse call
+  // but then handed onSubmit the raw, pre-transform `values` state instead
+  // of `result.data`. A schema using `z.coerce.number()`/`.transform()`
+  // validated correctly but silently passed onSubmit the untransformed
+  // value anyway — a real mismatch between what `FormProps.onSubmit`'s
+  // type (`z.infer<typeof schema>`) claims and what actually arrived at
+  // runtime, confirmed via a real consumer app (Founder's Desk) crashing
+  // a `.toFixed()` call on what its schema's type said was already a
+  // `number`. `data` is meaningless on failure (nothing should read it
+  // then) and defaults to `currentValues` in both the invalid and
+  // no-schema cases, so every caller can destructure it unconditionally.
+  const parseValues = (currentValues: Record<string, any>): { errors: Record<string, string>; data: Record<string, any> } => {
+    if (!schema) return { errors: {}, data: currentValues };
 
     const result = schema.safeParse(currentValues);
     if (result.success) {
-      return {};
+      return { errors: {}, data: result.data };
     }
 
     const newErrors: Record<string, string> = {};
@@ -90,7 +113,7 @@ export function Form<T extends Record<string, any> = Record<string, any>>({
       }
     });
 
-    return newErrors;
+    return { errors: newErrors, data: currentValues };
   };
 
   const setFieldValue = (name: string, value: any) => {
@@ -105,7 +128,7 @@ export function Form<T extends Record<string, any> = Record<string, any>>({
     const updated = { ...values, [name]: value };
     setValues(updated);
     if (schema) {
-      const errs = validateValues(updated);
+      const { errors: errs } = parseValues(updated);
       setErrors(errs);
       const isValid = Object.keys(errs).length === 0;
       aiBus.emit('form:validated', { formId: id, isValid });
@@ -135,7 +158,7 @@ export function Form<T extends Record<string, any> = Record<string, any>>({
   const validateField = (name: string, val?: any): boolean => {
     if (!schema) return true;
     const testValues = { ...values, [name]: val !== undefined ? val : values[name] };
-    const errs = validateValues(testValues);
+    const { errors: errs } = parseValues(testValues);
     setErrors(errs);
     const fieldIsValid = !errs[name];
     // form:validated/form:errored describe the whole form (matching
@@ -163,7 +186,7 @@ export function Form<T extends Record<string, any> = Record<string, any>>({
 
     setIsSubmitting(true);
 
-    const validationErrors = validateValues(values);
+    const { errors: validationErrors, data: parsedValues } = parseValues(values);
     setErrors(validationErrors);
 
     // Mark all fields touched
@@ -183,11 +206,11 @@ export function Form<T extends Record<string, any> = Record<string, any>>({
       return;
     }
 
-    aiBus.emit('form:submitted', { formId: id, values });
+    aiBus.emit('form:submitted', { formId: id, values: parsedValues });
 
     if (onSubmit) {
       try {
-        await onSubmit(values as T);
+        await onSubmit(parsedValues as T);
       } catch (err) {
         console.error('Error in Form onSubmit:', err);
       }

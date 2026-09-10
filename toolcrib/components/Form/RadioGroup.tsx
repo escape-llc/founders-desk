@@ -1,4 +1,15 @@
-import React, { type ReactNode, createContext, useContext } from 'react';
+'use client';
+
+/* eslint-disable react-hooks/rules-of-hooks -- RadioGroup.Option below is a real
+   component (the documented Component.Slot = (props) => {...} pattern this
+   repo's AGENTS.md manifest section describes for slot discovery), calling
+   useContext internally. The lint rule's naming heuristic only recognizes a
+   bare PascalCase identifier as a valid component name, not a
+   `RadioGroup.Option =` assignment target, so it misreads this as a plain
+   non-component function calling hooks illegally. Confirmed false positive,
+   not a real bug -- this renders and tests correctly today. Scoped to just
+   this one rule for this file; every other react-hooks rule still applies. */
+import React, { type ReactNode, createContext, useContext, useState } from 'react';
 import { RadioGroup as RadioGroupPrimitive } from 'radix-ui';
 import { useOptionalFormContext } from './FormContext';
 import { FieldContext } from './FieldContext';
@@ -98,10 +109,39 @@ export const RadioGroup: React.FC<RadioGroupProps> & {
     if (fieldName && registerField) registerField(fieldName);
   }, [fieldName, registerField]);
 
-  const formValue = fieldName && formContext ? formContext.values[fieldName] : undefined;
-  const selectedValue = externalValue !== undefined ? externalValue : formValue !== undefined ? formValue : defaultValue;
+  // `?? ''` (not left as plain `formContext.values[fieldName]`) matters for
+  // more than the empty-string fallback itself: `registerField`'s own
+  // effect above only runs AFTER this first render, so a form-bound field
+  // with no `initialValues` entry reads as `undefined` here for exactly
+  // one paint, then flips to `''` once registerField's effect commits —
+  // a real "component is changing from uncontrolled to controlled" React
+  // warning (Radix's RadioGroupPrimitive.Root gets `value={undefined}`,
+  // then `value={''}`), invisible in this suite until a global
+  // console.error/warn assertion actually looked for it. Resolving to `''`
+  // immediately here — matching what registerField is about to set
+  // anyway — keeps this control controlled from its very first render
+  // whenever it's form-bound, same fix `<Input>`'s own `formContext.values[name]
+  // ?? ''` already applies.
+  const formValue = fieldName && formContext ? formContext.values[fieldName] ?? '' : undefined;
+  // Standalone (no `value` prop, no Form ancestor) needs its own live,
+  // updating value -- not just `defaultValue` echoed back unchanged --
+  // because `RadioGroup.Option`'s own checked styling below reads
+  // `ctx.selectedValue` from this component's context, not from Radix's
+  // internal per-item DOM state, so it never updates on its own the way
+  // Radix's own indicator would. Without this, a standalone
+  // `<RadioGroup defaultValue="a">` looked identical to a fully controlled
+  // one from Radix's perspective (a `value` prop that's non-undefined on
+  // every render) with nothing ever feeding a new value back down after a
+  // click -- the same class of freeze found live in `<DatePicker>`/
+  // `<TimeField>` (see their own comments), just requiring a different fix
+  // here since this component's own context-driven styling -- not a
+  // third-party primitive's internal state -- is what depends on a value
+  // that's actually current.
+  const [internalValue, setInternalValue] = useState<string | undefined>(defaultValue);
+  const selectedValue = externalValue !== undefined ? externalValue : formValue !== undefined ? formValue : internalValue;
 
   const handleChange = (val: string) => {
+    setInternalValue(val);
     if (externalOnChange) {
       externalOnChange(val);
     }
